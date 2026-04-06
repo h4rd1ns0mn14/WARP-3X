@@ -16,7 +16,7 @@ WARP Manager v2.3
 Установка
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/h4rd1ns0mn14/WARP-3X/main/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/h4rd1ns0mn14/warp/main/install.sh | sudo bash
 ```
 
 Запуск
