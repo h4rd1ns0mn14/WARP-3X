@@ -52,6 +52,8 @@ AWG_CLIENTS_TABLE=""
 AWG_START_SH=""
 AWG_SUBNET=""
 AWG_WARP_EXIT_IP=""
+ROTATE_LAST_IP=""
+ROTATE_LAST_ERROR=""
 declare -a AWG_SELECTED_IPS=()
 declare -a AWG_CLIENT_IPS=()
 declare -A AWG_CLIENT_NAMES=()
@@ -103,6 +105,46 @@ has_3xui_mode() { [[ "$MODE" == "3xui" || "$MODE" == "both" ]]; }
 has_awg_mode()  { [[ "$MODE" == "amnezia" || "$MODE" == "both" ]]; }
 has_standalone_mode() { [[ "$MODE" == "standalone" ]]; }
 
+mode_label() {
+    case "${1:-$MODE}" in
+        amnezia) echo "AmneziaWG" ;;
+        both) echo "SOCKS5 / Custom Client + AmneziaWG" ;;
+        standalone) echo "Standalone" ;;
+        *) echo "SOCKS5 / Custom Client" ;;
+    esac
+}
+
+choose_mode_interactive() {
+    echo -e "  ${GREEN}1)${NC} SOCKS5 / Custom Client"
+    echo -e "      ${DIM}Для 3X-UI, TrustTunnel и любых сервисов/клиентов, которые умеют работать через SOCKS5${NC}"
+    echo -e "  ${GREEN}2)${NC} AmneziaWG (Docker WireGuard)"
+    echo -e "  ${GREEN}3)${NC} Оба режима"
+    echo -e "  ${GREEN}4)${NC} Только WARP (standalone)"
+    while true; do
+        read -p "Выберите режим (1/2/3/4): " choice
+        case "$choice" in
+            1) MODE="3xui"; return 0 ;;
+            2) MODE="amnezia"; return 0 ;;
+            3) MODE="both"; return 0 ;;
+            4) MODE="standalone"; return 0 ;;
+        esac
+    done
+}
+
+switch_mode_menu() {
+    clear
+    echo -e "\n${CYAN}━━━ Переключение режима ━━━${NC}\n"
+    echo -e "  ${WHITE}Текущий режим:${NC} ${GREEN}$(mode_label)${NC}\n"
+    choose_mode_interactive
+    save_config_val "MODE" "$MODE"
+    echo -e "\n${GREEN}[OK]${NC} Новый режим: ${CYAN}$(mode_label)${NC}"
+    if has_awg_mode; then
+        awg_pick_container 2>/dev/null && awg_load_container_data 2>/dev/null || true
+    fi
+    log_action "MODE SWITCH: ${MODE}"
+    read -p "Enter..."
+}
+
 detect_mode() {
     source "$WARP_CONF" 2>/dev/null
     if [ -n "${MODE:-}" ] && [[ "$MODE" == "3xui" || "$MODE" == "amnezia" || "$MODE" == "both" || "$MODE" == "standalone" ]]; then
@@ -128,19 +170,7 @@ detect_mode() {
         MODE="3xui"
     else
         echo -e "\n${YELLOW}Не обнаружено ни 3X-UI, ни AmneziaWG Docker.${NC}"
-        echo -e "  ${GREEN}1)${NC} 3X-UI (SOCKS5-прокси для Xray)"
-        echo -e "  ${GREEN}2)${NC} AmneziaWG (Docker WireGuard)"
-        echo -e "  ${GREEN}3)${NC} Оба режима"
-        echo -e "  ${GREEN}4)${NC} Только WARP (standalone)"
-        while true; do
-            read -p "Выберите режим (1/2/3/4): " choice
-            case "$choice" in
-                1) MODE="3xui"; break ;;
-                2) MODE="amnezia"; break ;;
-                3) MODE="both"; break ;;
-                4) MODE="standalone"; break ;;
-            esac
-        done
+        choose_mode_interactive
     fi
 
     save_config_val "MODE" "$MODE"
@@ -195,6 +225,89 @@ detect_os() {
     else
         OS_ID="unknown"
     fi
+}
+
+is_valid_warp_ip() {
+    local ip="${1:-}"
+    [ -n "$ip" ] && [ "$ip" != "N/A" ] && [ "$ip" != "null" ]
+}
+
+is_ip_changed() {
+    local old_ip="${1:-}" new_ip="${2:-}"
+    is_valid_warp_ip "$new_ip" || return 1
+    ! is_valid_warp_ip "$old_ip" && return 0
+    [ "$new_ip" != "$old_ip" ]
+}
+
+rotate_warp_ip_once_3xui() {
+    ROTATE_LAST_IP="N/A"
+    ROTATE_LAST_ERROR=""
+    warp-cli --accept-tos disconnect > /dev/null 2>&1 || true
+    sleep 2
+    warp-cli --accept-tos registration delete > /dev/null 2>&1 || true
+    sleep 2
+    if ! warp-cli --accept-tos registration new > /dev/null 2>&1; then
+        ROTATE_LAST_ERROR="registration"
+        return 1
+    fi
+    sleep 2
+    warp-cli --accept-tos mode proxy > /dev/null 2>&1 || true
+    warp-cli --accept-tos proxy port "${SOCKS_PORT}" > /dev/null 2>&1 || true
+    if ! warp-cli --accept-tos connect > /dev/null 2>&1; then
+        ROTATE_LAST_ERROR="connect"
+        return 1
+    fi
+    sleep 5
+    is_warp_running_3xui || { ROTATE_LAST_ERROR="not_running"; return 1; }
+    ROTATE_LAST_IP=$(get_warp_ip_3xui)
+    is_valid_warp_ip "$ROTATE_LAST_IP" || { ROTATE_LAST_ERROR="ip_unavailable"; return 1; }
+    return 0
+}
+
+rotate_warp_ip_once_standalone() {
+    ROTATE_LAST_IP="N/A"
+    ROTATE_LAST_ERROR=""
+    warp-cli --accept-tos disconnect > /dev/null 2>&1 || true
+    sleep 2
+    warp-cli --accept-tos registration delete > /dev/null 2>&1 || true
+    sleep 2
+    if ! warp-cli --accept-tos registration new > /dev/null 2>&1; then
+        ROTATE_LAST_ERROR="registration"
+        return 1
+    fi
+    sleep 2
+    warp-cli --accept-tos mode proxy > /dev/null 2>&1 || true
+    warp-cli --accept-tos proxy port "${SOCKS_PORT}" > /dev/null 2>&1 || true
+    if ! warp-cli --accept-tos connect > /dev/null 2>&1; then
+        ROTATE_LAST_ERROR="connect"
+        return 1
+    fi
+    sleep 5
+    is_warp_running_standalone || { ROTATE_LAST_ERROR="not_running"; return 1; }
+    ROTATE_LAST_IP=$(get_warp_ip_standalone)
+    is_valid_warp_ip "$ROTATE_LAST_IP" || { ROTATE_LAST_ERROR="ip_unavailable"; return 1; }
+    return 0
+}
+
+rotate_warp_ip_once_awg() {
+    ROTATE_LAST_IP="N/A"
+    ROTATE_LAST_ERROR=""
+    docker exec "$CONTAINER" sh -c "wg-quick down '$AWG_WARP_CONF' 2>/dev/null || true"
+    sleep 2
+    rm -f "$WGCF_ACCOUNT"
+    awg_ensure_account || { ROTATE_LAST_ERROR="registration"; return 1; }
+    awg_generate_profile || { ROTATE_LAST_ERROR="profile"; return 1; }
+    local ep
+    ep=$(awg_resolve_endpoint) || { ROTATE_LAST_ERROR="endpoint"; return 1; }
+    awg_build_warp_conf "$ep" || { ROTATE_LAST_ERROR="build_conf"; return 1; }
+    awg_warp_up > /dev/null 2>&1 || { ROTATE_LAST_ERROR="connect"; return 1; }
+    sleep 3
+    awg_apply_rules
+    awg_patch_start_sh
+    awg_detect_warp_exit_ip
+    ROTATE_LAST_IP="${AWG_WARP_EXIT_IP:-N/A}"
+    is_valid_warp_ip "$ROTATE_LAST_IP" || { ROTATE_LAST_ERROR="ip_unavailable"; return 1; }
+    return 0
 }
 
 # ═══════════════════════════════════════════════════════════════
@@ -327,22 +440,15 @@ change_warp_ip_3xui() {
     while [ $attempt -lt $max_attempts ]; do
         ((attempt++))
         echo -e "\n  ${YELLOW}[Попытка ${attempt}/${max_attempts}]${NC} Смена IP..."
+        if rotate_warp_ip_once_3xui; then
+            new_ip="$ROTATE_LAST_IP"
+        else
+            new_ip="$ROTATE_LAST_IP"
+            echo -e "  ${YELLOW}⚠ Ошибка попытки: ${ROTATE_LAST_ERROR:-unknown}. Пробую ещё...${NC}"
+            continue
+        fi
 
-        # Полная перерегистрация
-        warp-cli --accept-tos disconnect > /dev/null 2>&1
-        sleep 2
-        warp-cli --accept-tos registration delete > /dev/null 2>&1
-        sleep 2
-        warp-cli --accept-tos registration new > /dev/null 2>&1
-        sleep 2
-        warp-cli --accept-tos mode proxy > /dev/null 2>&1
-        warp-cli --accept-tos proxy port "${SOCKS_PORT}" > /dev/null 2>&1
-        warp-cli --accept-tos connect > /dev/null 2>&1
-        sleep 5
-
-        new_ip=$(get_warp_ip_3xui)
-
-        if [ "$new_ip" != "$old_ip" ] && [ "$new_ip" != "N/A" ]; then
+        if is_ip_changed "$old_ip" "$new_ip"; then
             echo -e "  ${GREEN}✓ IP успешно изменён!${NC}"
             echo -e "  ${WHITE}Было:${NC}  ${YELLOW}${old_ip}${NC}"
             echo -e "  ${WHITE}Стало:${NC} ${GREEN}${new_ip}${NC}"
@@ -503,6 +609,26 @@ show_3xui_guide() {
     echo -e ""
     echo -e "  ${WHITE}Проверка через SSH:${NC}"
     echo -e "  ${GREEN}curl -s --proxy socks5h://127.0.0.1:${SOCKS_PORT} ifconfig.me${NC}"
+    echo -e ""
+
+    echo -e "${YELLOW}═══ TRUSTTUNNEL ═══${NC}\n"
+    echo -e "  ${DIM}Если вы используете TrustTunnel endpoint на этом же сервере,${NC}"
+    echo -e "  ${DIM}его исходящий трафик можно пустить через локальный SOCKS5 WARP.${NC}\n"
+    echo -e "${YELLOW}Шаг 1.${NC} Убедитесь, что WARP запущен и SOCKS5 доступен на ${GREEN}127.0.0.1:${SOCKS_PORT}${NC}"
+    echo -e "${YELLOW}Шаг 2.${NC} Откройте конфиг TrustTunnel ${WHITE}vpn.toml${NC}"
+    echo -e "${YELLOW}Шаг 3.${NC} Замените direct forwarding на SOCKS5 forwarding:"
+    echo -e ""
+    cat <<EOF
+[forward_protocol.socks5]
+address = "127.0.0.1:${SOCKS_PORT}"
+extended_auth = false
+EOF
+    echo -e ""
+    echo -e "${YELLOW}Шаг 4.${NC} Перезапустите TrustTunnel endpoint"
+    echo -e "  ${GREEN}systemctl restart trusttunnel${NC}"
+    echo -e ""
+    echo -e "${YELLOW}Шаг 5.${NC} Проверьте внешний IP клиентского трафика"
+    echo -e "  ${DIM}После этого TrustTunnel будет форвардить исходящие соединения через WARP.${NC}"
     echo ""; read -p "Enter..."
 }
 
@@ -680,21 +806,15 @@ change_warp_ip_standalone() {
     while [ $attempt -lt $max_attempts ]; do
         ((attempt++))
         echo -e "\n  ${YELLOW}[Попытка ${attempt}/${max_attempts}]${NC} Смена IP..."
+        if rotate_warp_ip_once_standalone; then
+            new_ip="$ROTATE_LAST_IP"
+        else
+            new_ip="$ROTATE_LAST_IP"
+            echo -e "  ${YELLOW}⚠ Ошибка попытки: ${ROTATE_LAST_ERROR:-unknown}. Пробую ещё...${NC}"
+            continue
+        fi
 
-        warp-cli --accept-tos disconnect > /dev/null 2>&1
-        sleep 2
-        warp-cli --accept-tos registration delete > /dev/null 2>&1
-        sleep 2
-        warp-cli --accept-tos registration new > /dev/null 2>&1
-        sleep 2
-        warp-cli --accept-tos mode proxy > /dev/null 2>&1
-        warp-cli --accept-tos proxy port "${SOCKS_PORT}" > /dev/null 2>&1
-        warp-cli --accept-tos connect > /dev/null 2>&1
-        sleep 5
-
-        new_ip=$(get_warp_ip_standalone)
-
-        if [ "$new_ip" != "$old_ip" ] && [ "$new_ip" != "N/A" ]; then
+        if is_ip_changed "$old_ip" "$new_ip"; then
             echo -e "  ${GREEN}✓ IP успешно изменён!${NC}"
             echo -e "  ${WHITE}Было:${NC}  ${YELLOW}${old_ip}${NC}"
             echo -e "  ${WHITE}Стало:${NC} ${GREEN}${new_ip}${NC}"
@@ -1034,30 +1154,15 @@ change_warp_ip_awg() {
     while [ $attempt -lt $max_attempts ]; do
         ((attempt++))
         echo -e "\n  ${YELLOW}[Попытка ${attempt}/${max_attempts}]${NC} Смена IP..."
+        if rotate_warp_ip_once_awg; then
+            new_ip="$ROTATE_LAST_IP"
+        else
+            new_ip="$ROTATE_LAST_IP"
+            echo -e "  ${YELLOW}⚠ Ошибка попытки: ${ROTATE_LAST_ERROR:-unknown}. Пробую ещё...${NC}"
+            continue
+        fi
 
-        # Остановка
-        docker exec "$CONTAINER" sh -c "wg-quick down '$AWG_WARP_CONF' 2>/dev/null || true"
-        sleep 2
-
-        # Удаление аккаунта и новая регистрация
-        rm -f "$WGCF_ACCOUNT"
-        awg_ensure_account || { echo -e "${RED}Ошибка регистрации.${NC}"; break; }
-        awg_generate_profile || { echo -e "${RED}Ошибка генерации профиля.${NC}"; break; }
-
-        # Пересборка конфига
-        local ep; ep=$(awg_resolve_endpoint) || break
-        awg_build_warp_conf "$ep"
-
-        # Подключение
-        awg_warp_up 2>/dev/null || { echo -e "${RED}Ошибка подключения.${NC}"; break; }
-        sleep 3
-
-        awg_apply_rules
-        awg_patch_start_sh
-        awg_detect_warp_exit_ip
-        new_ip="${AWG_WARP_EXIT_IP:-N/A}"
-
-        if [ "$new_ip" != "$old_ip" ] && [ "$new_ip" != "N/A" ]; then
+        if is_ip_changed "$old_ip" "$new_ip"; then
             echo -e "  ${GREEN}✓ IP успешно изменён!${NC}"
             echo -e "  ${WHITE}Было:${NC}  ${YELLOW}${old_ip}${NC}"
             echo -e "  ${WHITE}Стало:${NC} ${GREEN}${new_ip}${NC}"
@@ -1774,83 +1879,67 @@ bot_handle_callback() {
         cip)
             tg_edit "$chat_id" "$msg_id" "🔄 <b>Смена IP Cloudflare</b>\n\n⏳ Выполняется..." ""
             local result=""
+            local max_attempts=5
+            local attempt
             if has_3xui_mode && is_warp_installed_3xui; then
                 local old_ip; old_ip=$(get_warp_ip_3xui)
-                warp-cli --accept-tos disconnect > /dev/null 2>&1
-                sleep 2
-                warp-cli --accept-tos registration delete > /dev/null 2>&1
-                sleep 2
-                warp-cli --accept-tos registration new > /dev/null 2>&1
-                sleep 2
-                warp-cli --accept-tos mode proxy > /dev/null 2>&1
-                warp-cli --accept-tos proxy port "${SOCKS_PORT}" > /dev/null 2>&1
-                warp-cli --accept-tos connect > /dev/null 2>&1
-                sleep 5
-                local new_ip; new_ip=$(get_warp_ip_3xui)
-                if [ "$new_ip" != "$old_ip" ] && [ "$new_ip" != "N/A" ]; then
+                local new_ip="N/A"
+                for ((attempt=1; attempt<=max_attempts; attempt++)); do
+                    rotate_warp_ip_once_3xui || true
+                    new_ip="$ROTATE_LAST_IP"
+                    is_ip_changed "$old_ip" "$new_ip" && break
+                done
+                if is_ip_changed "$old_ip" "$new_ip"; then
                     result+="✅ 3X-UI IP изменён\n"
                     result+="Было: <code>${old_ip}</code>\n"
-                    result+="Стало: <code>${new_ip}</code>"
-                    log_action "BOT 3XUI CHANGE_IP: ${old_ip} -> ${new_ip}"
+                    result+="Стало: <code>${new_ip}</code>\n"
+                    result+="Попыток: <code>${attempt}</code>\n"
+                    log_action "BOT 3XUI CHANGE_IP: ${old_ip} -> ${new_ip} in ${attempt} attempts"
                 else
                     result+="⚠️ 3X-UI: IP не изменился\n"
-                    result+="Попробуйте ещё раз позже"
+                    result+="Последний IP: <code>${new_ip}</code>\n"
+                    result+="Последняя ошибка: <code>${ROTATE_LAST_ERROR:-same_ip}</code>\n"
                 fi
             fi
             if has_standalone_mode && is_warp_installed_standalone; then
                 local old_ip; old_ip=$(get_warp_ip_standalone)
-                warp-cli --accept-tos disconnect > /dev/null 2>&1
-                sleep 2
-                warp-cli --accept-tos registration delete > /dev/null 2>&1
-                sleep 2
-                warp-cli --accept-tos registration new > /dev/null 2>&1
-                sleep 2
-                warp-cli --accept-tos mode proxy > /dev/null 2>&1
-                warp-cli --accept-tos proxy port "${SOCKS_PORT}" > /dev/null 2>&1
-                warp-cli --accept-tos connect > /dev/null 2>&1
-                sleep 5
-                local new_ip; new_ip=$(get_warp_ip_standalone)
-                if [ "$new_ip" != "$old_ip" ] && [ "$new_ip" != "N/A" ]; then
+                local new_ip="N/A"
+                for ((attempt=1; attempt<=max_attempts; attempt++)); do
+                    rotate_warp_ip_once_standalone || true
+                    new_ip="$ROTATE_LAST_IP"
+                    is_ip_changed "$old_ip" "$new_ip" && break
+                done
+                if is_ip_changed "$old_ip" "$new_ip"; then
                     result+="✅ WARP IP изменён\n"
                     result+="Было: <code>${old_ip}</code>\n"
-                    result+="Стало: <code>${new_ip}</code>"
-                    log_action "BOT STANDALONE CHANGE_IP: ${old_ip} -> ${new_ip}"
+                    result+="Стало: <code>${new_ip}</code>\n"
+                    result+="Попыток: <code>${attempt}</code>\n"
+                    log_action "BOT STANDALONE CHANGE_IP: ${old_ip} -> ${new_ip} in ${attempt} attempts"
                 else
                     result+="⚠️ WARP: IP не изменился\n"
-                    result+="Попробуйте ещё раз позже"
+                    result+="Последний IP: <code>${new_ip}</code>\n"
+                    result+="Последняя ошибка: <code>${ROTATE_LAST_ERROR:-same_ip}</code>\n"
                 fi
             fi
             if has_awg_mode && is_warp_installed_awg; then
                 awg_detect_warp_exit_ip
                 local old_ip="${AWG_WARP_EXIT_IP:-N/A}"
-                docker exec "$CONTAINER" sh -c "wg-quick down '$AWG_WARP_CONF' 2>/dev/null || true"
-                sleep 2
-                rm -f "$WGCF_ACCOUNT"
-                (cd /root && yes | ./wgcf register 2>/dev/null && yes | ./wgcf generate 2>/dev/null)
-                if [ -f "$WGCF_PROFILE" ]; then
-                    local ep; ep=$(awg_resolve_endpoint 2>/dev/null)
-                    if [ -n "$ep" ]; then
-                        awg_build_warp_conf "$ep"
-                        awg_warp_up 2>/dev/null
-                        sleep 3
-                        awg_apply_rules
-                        awg_patch_start_sh
-                        awg_detect_warp_exit_ip
-                        local new_ip="${AWG_WARP_EXIT_IP:-N/A}"
-                        if [ "$new_ip" != "$old_ip" ] && [ "$new_ip" != "N/A" ]; then
-                            result+="✅ AWG IP изменён\n"
-                            result+="Было: <code>${old_ip}</code>\n"
-                            result+="Стало: <code>${new_ip}</code>"
-                            log_action "BOT AWG CHANGE_IP: ${old_ip} -> ${new_ip}"
-                        else
-                            result+="⚠️ AWG: IP не изменился\n"
-                            result+="Попробуйте ещё раз позже"
-                        fi
-                    else
-                        result+="❌ AWG: ошибка endpoint\n"
-                    fi
+                local new_ip="N/A"
+                for ((attempt=1; attempt<=max_attempts; attempt++)); do
+                    rotate_warp_ip_once_awg || true
+                    new_ip="$ROTATE_LAST_IP"
+                    is_ip_changed "$old_ip" "$new_ip" && break
+                done
+                if is_ip_changed "$old_ip" "$new_ip"; then
+                    result+="✅ AWG IP изменён\n"
+                    result+="Было: <code>${old_ip}</code>\n"
+                    result+="Стало: <code>${new_ip}</code>\n"
+                    result+="Попыток: <code>${attempt}</code>\n"
+                    log_action "BOT AWG CHANGE_IP: ${old_ip} -> ${new_ip} in ${attempt} attempts"
                 else
-                    result+="❌ AWG: ошибка профиля\n"
+                    result+="⚠️ AWG: IP не изменился\n"
+                    result+="Последний IP: <code>${new_ip}</code>\n"
+                    result+="Последняя ошибка: <code>${ROTATE_LAST_ERROR:-same_ip}</code>\n"
                 fi
             fi
             [ -z "$result" ] && result="❌ WARP не установлен."
@@ -2210,11 +2299,12 @@ show_info() {
     echo ""
     if has_3xui_mode; then
         echo -e "${CYAN}═══ 3X-UI ═══${NC}\n"
-        echo -e "${WHITE}  Клиент → 3X-UI (Xray) → SOCKS5 (WARP) → Cloudflare → Интернет${NC}\n"
+        echo -e "${WHITE}  Клиент / сервис → SOCKS5 (WARP) → Cloudflare → Интернет${NC}\n"
         echo -e "${GREEN}  1.${NC} cloudflare-warp установлен нативно"
         echo -e "${GREEN}  2.${NC} SOCKS5-прокси на 127.0.0.1:${SOCKS_PORT}"
-        echo -e "${GREEN}  3.${NC} В 3X-UI: outbound SOCKS → warp"
-        echo -e "${GREEN}  4.${NC} Маршрутизация по доменам в Xray"
+        echo -e "${GREEN}  3.${NC} Подключите нужный клиент или сервис к SOCKS5-прокси WARP"
+        echo -e "${GREEN}  4.${NC} Подходит для 3X-UI, TrustTunnel и других совместимых решений"
+        echo -e "${GREEN}  5.${NC} Для TrustTunnel: в ${WHITE}vpn.toml${NC} используйте ${WHITE}[forward_protocol.socks5]${NC}"
         echo ""
     fi
     if has_awg_mode; then
@@ -2309,15 +2399,12 @@ show_menu() {
         local st sc
         st=$(get_warp_status)
         sc="$RED"; [[ "$st" == *"Подключён"* ]] && sc="$GREEN"; [[ "$st" == *"Отключён"* && "$st" != *"Подключён"* ]] && sc="$YELLOW"
-        local mode_label="3X-UI"
-        [ "$MODE" = "amnezia" ] && mode_label="AmneziaWG"
-        [ "$MODE" = "both" ] && mode_label="3X-UI + AmneziaWG"
-        [ "$MODE" = "standalone" ] && mode_label="Standalone"
+        local current_mode_label; current_mode_label=$(mode_label)
 
         echo -e "${MAGENTA}**********************************************************"
         echo -e "  WARP Manager v${WARP_VERSION}"
         echo -e "**********************************************************${NC}"
-        echo -e "  ${WHITE}IP сервера:${NC} ${GREEN}${MY_IP}${NC}   ${WHITE}Режим:${NC} ${CYAN}${mode_label}${NC}"
+        echo -e "  ${WHITE}IP сервера:${NC} ${GREEN}${MY_IP}${NC}   ${WHITE}Режим:${NC} ${CYAN}${current_mode_label}${NC}"
         echo -e "  ${WHITE}WARP:${NC} ${sc}${st}${NC}"
         if has_3xui_mode && is_warp_running_3xui 2>/dev/null; then
             echo -e "  ${WHITE}SOCKS5:${NC} ${CYAN}127.0.0.1:${SOCKS_PORT}${NC}"
@@ -2362,7 +2449,8 @@ show_menu() {
 
         echo -e "\n${CYAN}── Прочее ─────────────────────────────────────────────${NC}"
         echo -e " 10) ${MAGENTA}📚 Инструкция${NC}"
-        echo -e " 11) ${RED}⚠  Полное удаление${NC}"
+        echo -e " 11) ${WHITE}⇄ Переключить режим${NC}"
+        echo -e " 12) ${RED}⚠  Полное удаление${NC}"
         echo -e "  0) Выход"
         echo -e "${CYAN}──────────────────────────────────────────────────────${NC}"
         read -p "  Выбор: " ch
@@ -2390,7 +2478,8 @@ show_menu() {
             8)  has_awg_mode && awg_check_containers ;;
             9)  bot_menu ;;
             10) show_info ;;
-            11) full_uninstall ;;
+            11) switch_mode_menu ;;
+            12) full_uninstall ;;
             0)  exit 0 ;;
         esac
     done
@@ -2438,14 +2527,11 @@ run_startup() {
     ((s++))
     printf "  ${CYAN}[%d/%d]${NC}  ${YELLOW}⏳${NC}  Определение режима..." "$s" "$total"
     detect_mode
-    local mode_label="3X-UI"
-    [ "$MODE" = "amnezia" ] && mode_label="AmneziaWG"
-    [ "$MODE" = "both" ] && mode_label="3X-UI + AmneziaWG"
-    [ "$MODE" = "standalone" ] && mode_label="Standalone"
+    local current_mode_label; current_mode_label=$(mode_label)
     has_awg_mode && ((total++))
     has_3xui_mode && ((total++))
     has_standalone_mode && ((total++))
-    printf "\r  ${CYAN}[%d/%d]${NC}  ${GREEN}✓${NC}   Режим: %-25s           \n" "$s" "$total" "$mode_label"
+    printf "\r  ${CYAN}[%d/%d]${NC}  ${GREEN}✓${NC}   Режим: %-25s           \n" "$s" "$total" "$current_mode_label"
 
     if has_awg_mode; then
         ((s++))
@@ -2474,7 +2560,7 @@ run_startup() {
     local w=40 bar=""
     for ((i=0; i<w; i++)); do bar+="█"; done
     echo -e "  ${CYAN}[${GREEN}${bar}${CYAN}]${NC} ${GREEN}100%${NC}"
-    echo -e "\n  ${GREEN}✅  WARP Manager v${WARP_VERSION} (${mode_label}) готов!${NC}\n"
+    echo -e "\n  ${GREEN}✅  WARP Manager v${WARP_VERSION} (${current_mode_label}) готов!${NC}\n"
     sleep 2
 
     show_info
