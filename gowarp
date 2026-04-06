@@ -2287,8 +2287,8 @@ full_uninstall() {
 
     rm -rf "$WARP_DIR" "$WARP_LOG"
     echo -e "  ${GREEN}✓${NC}  Конфигурация и логи"
-    rm -f /usr/local/bin/gowarp
-    echo -e "  ${GREEN}✓${NC}  Команда gowarp"
+    rm -f /usr/local/bin/gowarp /usr/local/bin/warp-manager /usr/local/bin/warp
+    echo -e "  ${GREEN}✓${NC}  Команды gowarp/legacy алиасы"
 
     echo -e "\n${GREEN}══════════════════════════════════════════════════════════════${NC}"
     echo -e "${GREEN}  WARP Manager полностью удалён.${NC}"
@@ -2486,6 +2486,18 @@ run_startup() {
 # ═══════════════════════════════════════════════════════════════
 
 case "${1:-}" in
-    --bot-daemon) init_config; bot_daemon ;;
-    *) init_config; run_startup ;;
+    --version|-v)
+        echo "WARP Manager v${WARP_VERSION}"
+        exit 0
+        ;;
+    --bot-daemon)
+        check_root
+        init_config
+        bot_daemon
+        ;;
+    *)
+        check_root
+        init_config
+        run_startup
+        ;;
 esac

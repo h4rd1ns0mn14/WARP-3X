@@ -15,7 +15,7 @@ NC='\033[0m'
 
 GITHUB_RAW="https://raw.githubusercontent.com/h4rd1ns0mn14/WARP-3X/main"
 INSTALL_DIR="/etc/warp-manager"
-BIN_PATH="/usr/local/bin/warp-manager"
+BIN_PATH="/usr/local/bin/gowarp"
 
 echo -e "\n${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo -e "${WHITE}  WARP Manager v2.3 — Установка${NC}"
@@ -68,10 +68,10 @@ wget -qO "$BIN_PATH" "${GITHUB_RAW}/gowarp" || curl -fsSL -o "$BIN_PATH" "${GITH
 chmod +x "$BIN_PATH"
 echo -e "${GREEN}  ✓ Установлен в ${BIN_PATH}${NC}"
 
-# Символическая ссылка
-echo -e "${YELLOW}[4/5]${NC} Создание ссылки warp..."
-ln -sf "$BIN_PATH" /usr/local/bin/warp 2>/dev/null || true
-echo -e "${GREEN}  ✓ Команда 'warp' доступна${NC}"
+# Очистка legacy алиасов
+echo -e "${YELLOW}[4/5]${NC} Очистка legacy команд..."
+rm -f /usr/local/bin/warp-manager /usr/local/bin/warp 2>/dev/null || true
+echo -e "${GREEN}  ✓ Используется только команда 'gowarp'${NC}"
 
 # Проверка
 echo -e "${YELLOW}[5/5]${NC} Проверка установки..."
@@ -85,5 +85,5 @@ fi
 echo -e "\n${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo -e "${GREEN}  ✓ Установка завершена!${NC}"
 echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
-echo -e "${WHITE}Запуск:${NC} ${GREEN}warp${NC} или ${GREEN}warp-manager${NC}\n"
-echo -e "${WHITE}Проверка версии:${NC} ${GREEN}warp --version${NC}\n"
+echo -e "${WHITE}Запуск:${NC} ${GREEN}gowarp${NC}\n"
+echo -e "${WHITE}Проверка версии:${NC} ${GREEN}gowarp --version${NC}\n"

@@ -21,9 +21,7 @@ curl -fsSL https://raw.githubusercontent.com/h4rd1ns0mn14/WARP-3X/main/install.s
 Запуск
 
 ```bash
-warp
-# или
-warp-manager
+gowarp
 ```
 
 Режимы работы
